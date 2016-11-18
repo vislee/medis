@@ -116,4 +116,6 @@ then in another terminal try the following:
     prepend
     setflag
     getflag
+    incrby
+    decrby
 
