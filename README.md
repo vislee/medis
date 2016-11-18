@@ -82,37 +82,38 @@ then in another terminal try the following:
 
 --------------------
 
-set
-add
-replace
-append
-prepend
-get
-gets
-delete
-incr
-decr
+    set
+    add
+    replace
+    append
+    prepend
+    get
+    gets
+    delete
+    incr
+    decr
 
 
 ### Slaveof command mapping:
 
 --------------------
 
-set -> setex setflag
-add -> set
-replace -> set
-append -> append
-prepend -> prepend
-delete -> del
-incr -> incrby
-decr -> decrby
+    set -> setex && setflag
+    add -> set
+    replace -> set
+    append -> append
+    prepend -> prepend
+    delete -> del
+    incr -> incrby
+    decr -> decrby
 
 
 ### To add or modify some of the redis command:
 
 --------------------------
 
-append
-prepend
-setflag
-getflag
+    append
+    prepend
+    setflag
+    getflag
+
