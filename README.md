@@ -108,6 +108,20 @@ then in another terminal try the following:
     decr -> decrby
 
 
+### Aof command mapping:
+
+---------------------
+
+    set -> set && setflag && expire
+    add -> setnx
+    replace -> setex
+    append -> append
+    prepend -> prepend
+    delete -> del
+    incr -> incrby
+    decr -> decrby
+
+
 ### To add or modify some of the redis command:
 
 --------------------------

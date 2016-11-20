@@ -294,6 +294,15 @@ typedef struct memcachedSlaveCmd {
     char *sub_redis_cmd;
 } memcachedSlaveCmd;
 
+
+typedef struct memcachedAofCmd {
+    struct redisCommand *cmd;
+    char  *redis_cmd;
+    int    cmd_flag[16];
+    char  *sub_redis_cmd;
+} memcachedAofCmd;
+
+
 typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
     dict *expires;              /* Timeout of keys with a timeout set */
@@ -811,6 +820,21 @@ static memcachedSlaveCmd  meSlaveCmd[] = {
     {NULL,NULL,0,0,{0,},NULL}
 };
 
+static memcachedAofCmd meAofCmd[] = {
+    {meSetCommand, "set", {1,2,0,0,2}, "setflag"},
+    {meAddCommand, "setnx", {1,2,0,0,2}, NULL},
+    {meReplaceCommand, "setex", {1,2,0,0,2}, NULL},
+    {meAppendCommand, "append", {1,2,0,0,2}, NULL},
+    {mePrependCommand, "preppend", {1,2,0,0,2}, NULL},
+    {meDelCommand, "del", {1,2,2}, NULL},
+    {meIncrCommand, "incrby", {1,2,2}, NULL},
+    {meDecrCommand, "decrby", {1,2,2}, NULL},
+
+    {NULL, "setflag", {1,2,2}, "expire"},
+    {NULL, "expire", {1,2,0,2}, NULL},
+
+    {NULL, NULL, {0}, NULL}
+}
 
 static struct redisCommand meCmdTable[] = {
     {"set",meSetCommand,-5,REDIS_CMD_BULK|REDIS_CMD_DENYOOM|REDIS_CMD_MEMCACHED,NULL,0,0,0},
@@ -1159,7 +1183,7 @@ static void redisLog(int level, const char *fmt, ...) {
     va_start(ap, fmt);
     now = time(NULL);
     strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
-    fprintf(fp,"[%d] %s %c ",(int)getpid(),buf,c[level]);
+    fprintf(fp,"[%d:%d] %s %c ",(int)getppid(),(int)getpid(),buf,c[level]);
     vfprintf(fp, fmt, ap);
     fprintf(fp,"\n");
     fflush(fp);
@@ -4181,6 +4205,7 @@ static int rdbSaveBackground(char *filename) {
     server.dirty_before_bgsave = server.dirty;
     if ((childpid = fork()) == 0) {
         /* Child */
+        redisLog(REDIS_NOTICE, "rdbSaveBackground fork child");
         if (server.vm_enabled) vmReopenSwapFile();
         close(server.fd);
         close(server.memcached_fd);
@@ -9083,6 +9108,54 @@ static sds catAppendOnlyExpireAtCommand(sds buf, robj *key, robj *seconds) {
     return buf;
 }
 
+static sds mefreedAppendOnlyfile(sds buf, struct redisCommand *cmd, robj **argv, int argc) {
+    int j = 0;
+    int i = 0;
+    int k = 0;
+    char *sub_redis_cmd = NULL;
+    robj *tmpargv[3];
+
+    if (argc == 0) return buf;
+
+    while (meAofCmd[j]->cmd != NULL || meAofCmd[j]->redis_cmd != NULL) {
+        if (meAofCmd[j]->cmd != NULL && cmd == meAofCmd[j]->cmd) {
+            sub_redis_cmd = meAofCmd[j]->sub_redis_cmd;
+            for (i=0, k=0; i<argc && k<3; i++) {
+                if (meAofCmd[j]->cmd_flag[i] == 0) continue;
+                else if (meAofCmd[j]->cmd_flag[i] == 1) {
+                    tmpargv[k++] = createObject(REDIS_STRING, meAofCmd[j]->redis_cmd);
+                } else if (meAofCmd[j]->cmd_flag[i] == 2) {
+                    tmpargv[k++] = argv[i];
+                }
+            }
+            buf = catAppendOnlyGenericCommand(buf,3,tmpargv);
+            decrRefCount(tmpargv[0]);
+        } else if (sub_redis_cmd != NULL && meAofCmd[j]->redis_cmd == sub_redis_cmd) {
+            for (i=0, k=0; i<argc && k<3; i++) {
+                if (meAofCmd[j]->cmd_flag[i] == 0) continue;
+                else if (meAofCmd[j]->cmd_flag[i] == 1) {
+                    tmpargv[k++] = createObject(REDIS_STRING, meAofCmd[j]->redis_cmd);
+                } else if (meAofCmd[j]->cmd_flag[i] == 2) {
+                    tmpargv[k++] = argv[i];
+                }
+            }
+            if (strcasecmp(sub_redis_cmd, "expire") == 0) {
+                long seconds = 0;
+                if ((getLongLongFromObject(tmpargv[2], &seconds) == REDIS_OK) &&
+                    seconds > time(NULL)) {
+                    decrRefCount(tmpargv[0]);
+                    tmpargv[0] = createStringObject("expireat", 8);
+                }
+            }
+            buf = catAppendOnlyGenericCommand(buf,3,tmpargv);
+            decrRefCount(tmpargv[0]);
+        }
+        j++;
+    }
+
+    return buf;
+}
+
 static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
     robj *tmpargv[3];
@@ -9110,7 +9183,7 @@ static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv
         decrRefCount(tmpargv[0]);
         buf = catAppendOnlyExpireAtCommand(buf,argv[1],argv[2]);
     } else if(cmd->flags & REDIS_CMD_MEMCACHED) {
-
+        buf = mefreedAppendOnlyfile(buf, cmd, argv, argc);
     } else {
         buf = catAppendOnlyGenericCommand(buf,argc,argv);
     }
@@ -9520,10 +9593,12 @@ static int rewriteAppendOnlyFileBackground(void) {
     if (server.vm_enabled) waitEmptyIOJobsQueue();
     if ((childpid = fork()) == 0) {
         /* Child */
+        redisLog(REDIS_NOTICE, "rewriteAppendOnlyFileBackground fork child");
         char tmpfile[256];
 
         if (server.vm_enabled) vmReopenSwapFile();
         close(server.fd);
+        close(server.memcached_fd);
         snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
         if (rewriteAppendOnlyFile(tmpfile) == REDIS_OK) {
             _exit(0);
