@@ -295,14 +295,6 @@ typedef struct memcachedSlaveCmd {
 } memcachedSlaveCmd;
 
 
-typedef struct memcachedAofCmd {
-    struct redisCommand *cmd;
-    char  *redis_cmd;
-    int    cmd_flag[16];
-    char  *sub_redis_cmd;
-} memcachedAofCmd;
-
-
 typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
     dict *expires;              /* Timeout of keys with a timeout set */
@@ -501,6 +493,14 @@ struct redisCommand {
     int vm_lastkey;  /* THe last argument that's a key */
     int vm_keystep;  /* The step between first and last key */
 };
+
+typedef struct memcachedAofCmd {
+    redisCommandProc *proc;
+    char  *redis_cmd;
+    int    redis_argc;
+    int    cmd_flag[16];
+    char  *sub_redis_cmd;
+} memcachedAofCmd;
 
 struct redisFunctionSym {
     char *name;
@@ -820,21 +820,22 @@ static memcachedSlaveCmd  meSlaveCmd[] = {
     {NULL,NULL,0,0,{0,},NULL}
 };
 
+// redis_argc <= 3
 static memcachedAofCmd meAofCmd[] = {
-    {meSetCommand, "set", {1,2,0,0,2}, "setflag"},
-    {meAddCommand, "setnx", {1,2,0,0,2}, NULL},
-    {meReplaceCommand, "setex", {1,2,0,0,2}, NULL},
-    {meAppendCommand, "append", {1,2,0,0,2}, NULL},
-    {mePrependCommand, "preppend", {1,2,0,0,2}, NULL},
-    {meDelCommand, "del", {1,2,2}, NULL},
-    {meIncrCommand, "incrby", {1,2,2}, NULL},
-    {meDecrCommand, "decrby", {1,2,2}, NULL},
+    {meSetCommand, "set", 3, {1,2,0,0,2}, "setflag"},
+    {meAddCommand, "setnx", 3, {1,2,0,0,2}, NULL},
+    {meReplaceCommand, "setex", 3, {1,2,0,0,2}, NULL},
+    {meAppendCommand, "append", 3, {1,2,0,0,2}, NULL},
+    {mePrependCommand, "prepend", 3, {1,2,0,0,2}, NULL},
+    {meDelCommand, "del", 2, {1,2,0}, NULL},
+    {meIncrCommand, "incrby", 3, {1,2,2}, NULL},
+    {meDecrCommand, "decrby", 3, {1,2,2}, NULL},
 
-    {NULL, "setflag", {1,2,2}, "expire"},
-    {NULL, "expire", {1,2,0,2}, NULL},
+    {NULL, "setflag", 3, {1,2,2}, "expire"},
+    {NULL, "expire", 3, {1,2,0,2}, NULL},
 
-    {NULL, NULL, {0}, NULL}
-}
+    {NULL, NULL, 0, {0}, NULL}
+};
 
 static struct redisCommand meCmdTable[] = {
     {"set",meSetCommand,-5,REDIS_CMD_BULK|REDIS_CMD_DENYOOM|REDIS_CMD_MEMCACHED,NULL,0,0,0},
@@ -2445,7 +2446,7 @@ static void call(redisClient *c, struct redisCommand *cmd) {
     cmd->proc(c);
     dirty = server.dirty-dirty;
 
-    if (server.appendonly && dirty && c->memcached == 0)
+    if (server.appendonly && dirty)
         feedAppendOnlyFile(cmd,c->db->id,c->argv,c->argc);
     if ((dirty || cmd->flags & REDIS_CMD_FORCE_REPLICATION) &&
         listLength(server.slaves))
@@ -9117,42 +9118,44 @@ static sds mefreedAppendOnlyfile(sds buf, struct redisCommand *cmd, robj **argv,
 
     if (argc == 0) return buf;
 
-    while (meAofCmd[j]->cmd != NULL || meAofCmd[j]->redis_cmd != NULL) {
-        if (meAofCmd[j]->cmd != NULL && cmd == meAofCmd[j]->cmd) {
-            sub_redis_cmd = meAofCmd[j]->sub_redis_cmd;
+    while (meAofCmd[j].proc != NULL || meAofCmd[j].redis_cmd != NULL) {
+        if (meAofCmd[j].proc != NULL && cmd->proc == meAofCmd[j].proc) {
             for (i=0, k=0; i<argc && k<3; i++) {
-                if (meAofCmd[j]->cmd_flag[i] == 0) continue;
-                else if (meAofCmd[j]->cmd_flag[i] == 1) {
-                    tmpargv[k++] = createObject(REDIS_STRING, meAofCmd[j]->redis_cmd);
-                } else if (meAofCmd[j]->cmd_flag[i] == 2) {
+                if (meAofCmd[j].cmd_flag[i] == 0) continue;
+                else if (meAofCmd[j].cmd_flag[i] == 1) {
+                    tmpargv[k++] = createStringObject(meAofCmd[j].redis_cmd, strlen(meAofCmd[j].redis_cmd));
+                } else if (meAofCmd[j].cmd_flag[i] == 2) {
                     tmpargv[k++] = argv[i];
                 }
             }
-            buf = catAppendOnlyGenericCommand(buf,3,tmpargv);
+            buf = catAppendOnlyGenericCommand(buf,meAofCmd[j].redis_argc,tmpargv);
             decrRefCount(tmpargv[0]);
-        } else if (sub_redis_cmd != NULL && meAofCmd[j]->redis_cmd == sub_redis_cmd) {
+            sub_redis_cmd = meAofCmd[j].sub_redis_cmd;
+        } else if (sub_redis_cmd != NULL && meAofCmd[j].redis_cmd == sub_redis_cmd) {
             for (i=0, k=0; i<argc && k<3; i++) {
-                if (meAofCmd[j]->cmd_flag[i] == 0) continue;
-                else if (meAofCmd[j]->cmd_flag[i] == 1) {
-                    tmpargv[k++] = createObject(REDIS_STRING, meAofCmd[j]->redis_cmd);
-                } else if (meAofCmd[j]->cmd_flag[i] == 2) {
+                if (meAofCmd[j].cmd_flag[i] == 0) continue;
+                else if (meAofCmd[j].cmd_flag[i] == 1) {
+                    tmpargv[k++] = createStringObject(meAofCmd[j].redis_cmd, strlen(meAofCmd[j].redis_cmd));
+                } else if (meAofCmd[j].cmd_flag[i] == 2) {
                     tmpargv[k++] = argv[i];
                 }
             }
             if (strcasecmp(sub_redis_cmd, "expire") == 0) {
-                long seconds = 0;
+                long long seconds = 0;
                 if ((getLongLongFromObject(tmpargv[2], &seconds) == REDIS_OK) &&
                     seconds > time(NULL)) {
                     decrRefCount(tmpargv[0]);
                     tmpargv[0] = createStringObject("expireat", 8);
                 }
             }
-            buf = catAppendOnlyGenericCommand(buf,3,tmpargv);
+            buf = catAppendOnlyGenericCommand(buf,meAofCmd[j].redis_argc,tmpargv);
             decrRefCount(tmpargv[0]);
+            sub_redis_cmd = meAofCmd[j].sub_redis_cmd;
         }
         j++;
     }
 
+    redisLog(REDIS_NOTICE, "medis: cmd: %s aof buf: %s\n", cmd->name, buf);
     return buf;
 }
 
