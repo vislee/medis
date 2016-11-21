@@ -3,17 +3,27 @@
 prog=medis-server
 bin=/usr/local/sbin/
 conf=/etc/conf/medis.conf
+if [ $# -gt 1 ]; then
+    conf=$2
+fi
+
+pidfile=`grep 'pidfile' ${conf} |awk '{print $2}'`
+
 
 function get_pid(){
     local pid=0
-    ret=$(ps aux |grep ${prog} |grep ${conf} |grep -v grep|awk '{print $2}')
-    if [ "x$ret" != "x" ]; then
-        echo $ret
-        return 0
+    if [ -f ${pidfile} ]; then
+        read pid < "${pidfile}"
+        if [ "x$pid" != "x" ]; then
+            ret=$(ps aux |grep ${prog} |grep $pid |grep -v grep|awk '{print $0}')
+            if [ "x$ret" != "x" ]; then
+                echo $pid
+                return 0
+            fi
+        fi
     fi
     echo 0
 }
-
 
 function service_start(){
     local pid=$(get_pid)
@@ -23,7 +33,6 @@ function service_start(){
         return 1
     fi
 
-    ps aux |grep ${prog} |grep -v grep | awk '{print "kill -9 " $2}' | sh
     ${bin}${prog} ${conf}
     sleep 0.1
     local pid=$(get_pid)
