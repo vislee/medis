@@ -9400,6 +9400,7 @@ static int fwriteBulkLong(FILE *fp, long l) {
  * "filename". Used both by REWRITEAOF and BGREWRITEAOF. */
 static int rewriteAppendOnlyFile(char *filename) {
     dictIterator *di = NULL;
+    int flag = 0;
     dictEntry *de;
     FILE *fp;
     char tmpfile[256];
@@ -9435,6 +9436,7 @@ static int rewriteAppendOnlyFile(char *filename) {
             time_t expiretime;
             int swapped;
 
+            flag = dictGetEntryFlag(de);
             key = dictGetEntryKey(de);
             /* If the value for this key is swapped, load a preview in memory.
              * We use a "swapped" flag to remember if we need to free the
@@ -9548,6 +9550,12 @@ static int rewriteAppendOnlyFile(char *filename) {
                 if (fwrite(cmd,sizeof(cmd)-1,1,fp) == 0) goto werr;
                 if (fwriteBulkObject(fp,key) == 0) goto werr;
                 if (fwriteBulkLong(fp,expiretime) == 0) goto werr;
+            }
+            if (flag != 0) {
+                char cmd[] = "*3\r\n$7\r\SETFLAG\r\n";
+                if (fwrite(cmd,sizeof(cmd)-1,1,fp) == 0) goto werr;
+                if (fwriteBulkObject(fp,key) == 0) goto werr;
+                if (fwriteBulkLong(fp,flag) == 0) goto werr;
             }
             if (swapped) decrRefCount(o);
         }
