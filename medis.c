@@ -193,6 +193,9 @@ static char* strencoding[] = {
 #define REDIS_MULTI 8       /* This client is in a MULTI context */
 #define REDIS_BLOCKED 16    /* The client is waiting in a blocking operation */
 #define REDIS_IO_WAIT 32    /* The client is waiting for Virtual Memory I/O */
+#define REDIS_MEMCACHED 64  /* The client is memcached client*/
+#define REDIS_MEMCACHED_NOREPLY 128 /* the client is memecached noreply*/
+
 
 /* Slave replication state - slave side */
 #define REDIS_REPL_NONE 0   /* No active replication */
@@ -467,6 +470,7 @@ struct redisServer {
     list *pubsub_patterns; /* A list of pubsub_patterns */
     /* Misc */
     FILE *devnull;
+    /* Memcached */
     int memcached_port;
     int memcached_fd;
     tcpAcceptData *redisAccept, *memcachedAccept;
@@ -831,8 +835,8 @@ static memcachedAofCmd meAofCmd[] = {
     {meIncrCommand, "incrby", 3, {1,2,2}, NULL},
     {meDecrCommand, "decrby", 3, {1,2,2}, NULL},
 
-    {NULL, "setflag", 3, {1,2,2}, "expire"},
-    {NULL, "expire", 3, {1,2,0,2}, NULL},
+    {NULL, "setflag", 3, {1,2,2}, "expireat"},
+    {NULL, "expireat", 3, {1,2,0,2}, NULL},
 
     {NULL, NULL, 0, {0}, NULL}
 };
@@ -846,7 +850,7 @@ static struct redisCommand meCmdTable[] = {
     {"cas",meCasCommand,-5,REDIS_CMD_BULK|REDIS_CMD_DENYOOM|REDIS_CMD_MEMCACHED,NULL,0,0,0},
     {"get",meMgetCommand,-2,REDIS_CMD_INLINE|REDIS_CMD_MEMCACHED_REPLY|REDIS_CMD_MEMCACHED,NULL,1,-1,1},
     {"gets",meMgetCommand,-2,REDIS_CMD_INLINE|REDIS_CMD_MEMCACHED_REPLY|REDIS_CMD_MEMCACHED,NULL,1,-1,1},
-    {"delete",meDelCommand,-2,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM|REDIS_CMD_MEMCACHED,NULL,0,0,0},
+    {"delete",meDelCommand,-2,REDIS_CMD_INLINE|REDIS_CMD_MEMCACHED,NULL,0,0,0},
     {"incr",meIncrCommand,3,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM|REDIS_CMD_MEMCACHED,NULL,0,0,0},
     {"decr",meDecrCommand,3,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM|REDIS_CMD_MEMCACHED,NULL,0,0,0},
 
@@ -1184,7 +1188,7 @@ static void redisLog(int level, const char *fmt, ...) {
     va_start(ap, fmt);
     now = time(NULL);
     strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
-    fprintf(fp,"[%d:%d] %s %c ",(int)getppid(),(int)getpid(),buf,c[level]);
+    fprintf(fp,"[%d] %s %c ",(int)getpid(),buf,c[level]);
     vfprintf(fp, fmt, ap);
     fprintf(fp,"\n");
     fflush(fp);
@@ -4802,10 +4806,11 @@ static void meSetGenericCommand(redisClient *c, int nx, robj *key, robj *val, ro
     server.dirty++;
     removeExpire(c->db,key);
     if (expire && seconds > 0) {
-        if (seconds > time(NULL)) {
-            setExpire(c->db,key,(time_t)seconds);
-        } else {
+        // about 15 years
+        if (seconds < 522169200) {
             setExpire(c->db,key,time(NULL)+seconds);
+        } else {
+            setExpire(c->db,key,(time_t)seconds);
         }
     }
     addReply(c, nx ? shared.meexists : shared.mestored);
@@ -9115,6 +9120,7 @@ static sds mefreedAppendOnlyfile(sds buf, struct redisCommand *cmd, robj **argv,
     int k = 0;
     char *sub_redis_cmd = NULL;
     robj *tmpargv[3];
+    int x = -1;
 
     if (argc == 0) return buf;
 
@@ -9123,33 +9129,51 @@ static sds mefreedAppendOnlyfile(sds buf, struct redisCommand *cmd, robj **argv,
             for (i=0, k=0; i<argc && k<3; i++) {
                 if (meAofCmd[j].cmd_flag[i] == 0) continue;
                 else if (meAofCmd[j].cmd_flag[i] == 1) {
+                    x = k;
                     tmpargv[k++] = createStringObject(meAofCmd[j].redis_cmd, strlen(meAofCmd[j].redis_cmd));
                 } else if (meAofCmd[j].cmd_flag[i] == 2) {
                     tmpargv[k++] = argv[i];
                 }
             }
             buf = catAppendOnlyGenericCommand(buf,meAofCmd[j].redis_argc,tmpargv);
-            decrRefCount(tmpargv[0]);
+            if (x != -1) {
+                decrRefCount(tmpargv[x]);
+                x = -1;
+            }
             sub_redis_cmd = meAofCmd[j].sub_redis_cmd;
         } else if (sub_redis_cmd != NULL && meAofCmd[j].redis_cmd == sub_redis_cmd) {
             for (i=0, k=0; i<argc && k<3; i++) {
                 if (meAofCmd[j].cmd_flag[i] == 0) continue;
                 else if (meAofCmd[j].cmd_flag[i] == 1) {
+                    x = k;
                     tmpargv[k++] = createStringObject(meAofCmd[j].redis_cmd, strlen(meAofCmd[j].redis_cmd));
                 } else if (meAofCmd[j].cmd_flag[i] == 2) {
                     tmpargv[k++] = argv[i];
                 }
             }
-            if (strcasecmp(sub_redis_cmd, "expire") == 0) {
-                long long seconds = 0;
-                if ((getLongLongFromObject(tmpargv[2], &seconds) == REDIS_OK) &&
-                    seconds > time(NULL)) {
-                    decrRefCount(tmpargv[0]);
-                    tmpargv[0] = createStringObject("expireat", 8);
+
+            long seconds = -1;
+            if (strcasecmp(sub_redis_cmd, "expireat") == 0) {
+                seconds = strtol(tmpargv[2]->ptr,NULL,10);
+                long when = 0;
+
+                /* Magic Number 522169200: about 15 years */
+                if (seconds > 0 && seconds < 522169200) {
+                    when = time(NULL) + seconds;
+                    tmpargv[2] = createObject(REDIS_STRING, sdscatprintf(sdsempty(),"%ld", when));
                 }
+
             }
-            buf = catAppendOnlyGenericCommand(buf,meAofCmd[j].redis_argc,tmpargv);
-            decrRefCount(tmpargv[0]);
+            if (seconds != 0) {
+                buf = catAppendOnlyGenericCommand(buf,meAofCmd[j].redis_argc,tmpargv);
+            }
+            if (x != -1) {
+                decrRefCount(tmpargv[x]);
+                x = -1;
+            }
+            if (seconds > 0 && seconds < 522169200) {
+                decrRefCount(tmpargv[2]);
+            }
             sub_redis_cmd = meAofCmd[j].sub_redis_cmd;
         }
         j++;
@@ -9552,7 +9576,7 @@ static int rewriteAppendOnlyFile(char *filename) {
                 if (fwriteBulkLong(fp,expiretime) == 0) goto werr;
             }
             if (flag != 0) {
-                char cmd[] = "*3\r\n$7\r\SETFLAG\r\n";
+                char cmd[] = "*3\r\n$7\r\nSETFLAG\r\n";
                 if (fwrite(cmd,sizeof(cmd)-1,1,fp) == 0) goto werr;
                 if (fwriteBulkObject(fp,key) == 0) goto werr;
                 if (fwriteBulkLong(fp,flag) == 0) goto werr;
