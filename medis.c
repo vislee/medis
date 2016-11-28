@@ -3198,7 +3198,7 @@ static void meAddReplyBulk(redisClient *c, robj *key, int flag, robj *obj) {
         }
     }
     intlen = snprintf(buf, sizeof(buf)-1, "VALUE %s %d %ld\r\n", (char*)key->ptr, flag, len);
-    addReplySds(c,sdsnewlen(buf,intlen+1));
+    addReplySds(c,sdsnewlen(buf,intlen));
     addReply(c,obj);
     addReply(c,shared.crlf);
 }
