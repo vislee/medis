@@ -18,10 +18,12 @@ CCOPT= $(CFLAGS) $(CCLINK) $(ARCH) $(PROF)
 DEBUG?= -g -rdynamic -ggdb 
 
 OBJ = adlist.o ae.o anet.o dict.o medis.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o
+CHECKDUMPOBJ = medis-check-dump.o lzf_c.o lzf_d.o
 
 PRGNAME = medis-server
+CHECKDUMPPRGNAME = medis-check-dump
 
-all: medis-server install
+all: medis-server medis-check-dump install
 
 # Deps (use make dep to generate this)
 adlist.o: adlist.c adlist.h zmalloc.h
@@ -36,6 +38,7 @@ lzf_d.o: lzf_d.c lzfP.h
 pqsort.o: pqsort.c
 medis.o: medis.c fmacros.h config.h medis.h ae.h sds.h anet.h dict.h \
   adlist.h zmalloc.h lzf.h pqsort.h zipmap.h staticsymbols.h sha1.h
+medis-check-dump.o: medis-check-dump.c lzf.h
 sds.o: sds.c sds.h zmalloc.h
 zipmap.o: zipmap.c zmalloc.h
 zmalloc.o: zmalloc.c config.h
@@ -43,12 +46,16 @@ zmalloc.o: zmalloc.c config.h
 medis-server: $(OBJ)
 	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ)
 
+medis-check-dump: $(CHECKDUMPOBJ)
+	$(CC) -o $(CHECKDUMPPRGNAME) $(CCOPT) $(DEBUG) $(CHECKDUMPOBJ)
+
 .c.o:
 	$(CC) -c $(CFLAGS) $(DEBUG) $(COMPILE_TIME) $<
 
 clean:
-	rm -rf $(PRGNAME) *.o
+	rm -rf $(PRGNAME) $(CHECKDUMPPRGNAME) *.o
 
 install:
 	install -D $(PRGNAME) $(DEST_DIR)/sbin/$(PRGNAME)
+	install -D $(CHECKDUMPPRGNAME) $(DEST_DIR)/sbin/$(CHECKDUMPPRGNAME)
 	install -D medis.conf /etc/conf/medis.conf
