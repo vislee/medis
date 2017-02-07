@@ -67,6 +67,7 @@ typedef struct {
     void *data;
     size_t size;
     size_t offset;
+    int expire;
 } pos;
 
 static unsigned char level = 0;
@@ -91,6 +92,7 @@ static errors_t errors;
 /* Data type to hold opcode with optional key name an success status */
 typedef struct {
     char* key;
+    int pre_type;
     int type;
     char success;
 } entry;
@@ -145,6 +147,7 @@ int loadType(entry *e) {
     unsigned char t;
     if (readBytes(&t, 1)) {
         if (t <= 4 || t >= 253) {
+            e->pre_type = e->type;
             e->type = t;
             return 1;
         } else {
@@ -446,7 +449,7 @@ int loadPair(entry *e) {
 }
 
 entry loadEntry() {
-    entry e = { NULL, -1, 0 };
+    entry e = { NULL, -1, -1, 0 };
     uint32_t length, offset[4];
 
     /* reset error container */
@@ -605,6 +608,13 @@ void process() {
             num_valid_ops++;
             num_valid_bytes += positions[1].offset - positions[0].offset;
 
+            if (positions[0].expire == 1 && entry.pre_type == 253 && entry.key != NULL) {
+                printf("-->expire key: %s\n", entry.key);
+            }
+            if (positions[0].expire == 2 && entry.pre_type == -1 && entry.key != NULL) {
+                printf("-->no expire key: %s\n", entry.key);
+            }
+
             /* advance position */
             positions[0] = positions[1];
         }
@@ -638,7 +648,7 @@ void process() {
 int main(int argc, char **argv) {
     /* expect the first argument to be the dump file */
     if (argc <= 1) {
-        printf("Usage: %s <dump.rdb>\n", argv[0]);
+        printf("Usage: %s <dump.rdb> <expire>(0:no,1:expire key,2:no expire key)\n", argv[0]);
         exit(0);
     }
 
@@ -670,6 +680,11 @@ int main(int argc, char **argv) {
     positions[0].data = data;
     positions[0].size = size;
     positions[0].offset = 0;
+    positions[0].expire = 0;
+    if (argc >= 3) {
+        // 1-put expire key 2-put no expire key
+        positions[0].expire = atoi(argv[2]);
+    }
     errors.level = 0;
 
     /* Object types */
